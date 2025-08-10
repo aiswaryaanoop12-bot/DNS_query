@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DNS Resolver — A & AAAA</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      max-width: 760px;
+      margin: 3rem auto;
+      padding: 1.5rem;
+      background: #f7f9fc;
+      color: #0f172a;
+      border-radius: 12px;
+      box-shadow: 0 6px 20px rgba(15,23,42,0.06);
+    }
+    header { margin-bottom: 1rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 .25rem 0; }
+    p.lead { margin: 0 0 1rem 0; color:#475569; font-size: .95rem; }
+    form { display:flex; gap:.5rem; margin-bottom:1rem; }
+    input[type="text"]{
+      flex:1;
+      padding:.5rem .75rem;
+      border-radius:8px;
+      border:1px solid #e2e8f0;
+      font-size:1rem;
+    }
+    button {
+      padding:.5rem .75rem;
+      border-radius:8px;
+      border: none;
+      background: #2563eb;
+      color: white;
+      font-weight:600;
+      cursor:pointer;
+    }
+    button:disabled { opacity:.6; cursor:progress; }
+    .box {
+      background:white;
+      padding: 1rem;
+      border-radius:10px;
+      border:1px solid #e6eefc;
+      box-shadow: 0 2px 6px rgba(2,6,23,0.03);
+    }
+    .addresses { display:flex; gap:1rem; margin-top:.75rem; flex-wrap:wrap; }
+    .addr-col { flex:1; min-width:200px; }
+    .addr-col h3 { margin:0 0 .5rem 0; font-size:.95rem; }
+    .list { margin:0; padding:0; list-style:none; }
+    .list li { padding:.35rem .5rem; border-radius:6px; background:#f8fafc; margin-bottom:.4rem; font-family: monospace; }
+    .error { color: #b91c1c; margin-top:.5rem; }
+    pre { white-space:pre-wrap; font-size:.85rem; background:#0f172a; color:#d1fae5; padding:.6rem; border-radius:8px; overflow:auto; max-height:240px; }
+    footer { margin-top:1rem; color:#64748b; font-size:.85rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DNS Resolver — A (IPv4) &amp; AAAA (IPv6)</h1>
+    <p class="lead">Enter a domain and click <strong>Resolve</strong>. This page uses DNS-over-HTTPS (Google's public DoH) to fetch records from the browser.</p>
+  </header>
+
+  <div class="box">
+    <form id="dnsForm" onsubmit="return false;">
+      <input id="domainInput" type="text" value="www.kame.net" aria-label="domain" />
+      <button id="resolveBtn" type="button">Resolve</button>
+    </form>
+
+    <div id="resultArea" aria-live="polite">
+      <div class="addresses">
+        <div class="addr-col">
+          <h3>IPv4 addresses (A)</h3>
+          <ul id="v4list" class="list"><li>—</li></ul>
+        </div>
+        <div class="addr-col">
+          <h3>IPv6 addresses (AAAA)</h3>
+          <ul id="v6list" class="list"><li>—</li></ul>
+        </div>
+      </div>
+
+      <div id="error" class="error" role="status"></div>
+
+      <details style="margin-top: .8rem;">
+        <summary style="cursor:pointer">Raw DNS JSON (click to expand)</summary>
+        <pre id="rawJson">—</pre>
+      </details>
+    </div>
+  </div>
+
+  <footer>
+    Note: If the domain has no A or AAAA records, the corresponding list will be empty. Uses: <code>https://dns.google/resolve?name=DOMAIN&amp;type=A|AAAA</code>
+  </footer>
+
+  <script>
+    const resolveBtn = document.getElementById('resolveBtn');
+    const domainInput = document.getElementById('domainInput');
+    const v4list = document.getElementById('v4list');
+    const v6list = document.getElementById('v6list');
+    const rawJson = document.getElementById('rawJson');
+    const errorDiv = document.getElementById('error');
+
+    // Helper to render list items
+    function setList(el, items) {
+      el.innerHTML = '';
+      if (!items || items.length === 0) {
+        const li = document.createElement('li');
+        li.textContent = '—';
+        el.appendChild(li);
+        return;
+      }
+      items.forEach(i => {
+        const li = document.createElement('li');
+        li.textContent = i;
+        el.appendChild(li);
+      });
+    }
+
+    // Query function using Google's DNS-over-HTTPS resolver.
+    async function dohResolve(domain, type) {
+      // dns.google supports JSON at /resolve
+      const url = `https://dns.google/resolve?name=${encodeURIComponent(domain)}&type=${type}`;
+      const resp = await fetch(url, { method: 'GET' });
+      if (!resp.ok) throw new Error(`Network error: ${resp.status} ${resp.statusText}`);
+      return resp.json();
+    }
+
+    async function resolveAll(domain) {
+      errorDiv.textContent = '';
+      setList(v4list, []);
+      setList(v6list, []);
+      rawJson.textContent = 'Loading...';
+      resolveBtn.disabled = true;
+
+      try {
+        // Parallel queries for A and AAAA
+        const [aJson, aaaaJson] = await Promise.allSettled([
+          dohResolve(domain, 'A'),
+          dohResolve(domain, 'AAAA')
+        ]);
+
+        let v4 = [], v6 = [];
+        let combinedRaw = { A: null, AAAA: null };
+
+        if (aJson.status === 'fulfilled') {
+          combinedRaw.A = aJson.value;
+          if (Array.isArray(aJson.value.Answer)) {
+            v4 = aJson.value.Answer
+              .filter(a => a.type === 1) // type 1 == A
+              .map(a => a.data);
+          }
+        } else {
+          // if fail, save error message
+          combinedRaw.A = { error: String(aJson.reason) };
+        }
+
+        if (aaaaJson.status === 'fulfilled') {
+          combinedRaw.AAAA = aaaaJson.value;
+          if (Array.isArray(aaaaJson.value.Answer)) {
+            v6 = aaaaJson.value.Answer
+              .filter(a => a.type === 28) // type 28 == AAAA
+              .map(a => a.data);
+          }
+        } else {
+          combinedRaw.AAAA = { error: String(aaaaJson.reason) };
+        }
+
+        setList(v4list, v4);
+        setList(v6list, v6);
+        rawJson.textContent = JSON.stringify(combinedRaw, null, 2);
+
+        // If both queries failed, show an error
+        if ((aJson.status === 'rejected') && (aaaaJson.status === 'rejected')) {
+          errorDiv.textContent = 'Failed to query DNS. Check your network or try again.';
+        } else {
+          // clear error if results exist
+          errorDiv.textContent = '';
+        }
+      } catch (err) {
+        errorDiv.textContent = 'Unexpected error: ' + err;
+        rawJson.textContent = '—';
+      } finally {
+        resolveBtn.disabled = false;
+      }
+    }
+
+    // Wire up
+    resolveBtn.addEventListener('click', () => {
+      const d = domainInput.value.trim();
+      if (!d) {
+        errorDiv.textContent = 'Please enter a domain name (e.g., www.kame.net).';
+        return;
+      }
+      resolveAll(d);
+    });
+
+    // Auto-resolve default on load
+    window.addEventListener('load', () => {
+      resolveAll(domainInput.value.trim());
+    });
+  </script>
+</body>
+</html>
